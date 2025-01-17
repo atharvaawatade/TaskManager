@@ -38,6 +38,8 @@ TASK_CATEGORIES = [
 ]
 
 # ---- FUNCTIONS ----
+# The error is in the analyze_task function, let's fix that part:
+
 def analyze_task(task_description, category):
     try:
         context_prompt = f"This is a {category} task in software development. "
@@ -47,9 +49,7 @@ def analyze_task(task_description, category):
                 {"role": "system", "content": """You are a technical task analyzer for software development projects. 
                 Extract the due date, priority, and estimate complexity (Easy/Medium/Hard) from the task description.
                 Consider the technical complexity, potential dependencies, and impact on the project."""},
-                {"role": "user", "content": f"{context_prompt}Analyze this task: '{task_description}'\n
-                Output format: Due Date: YYYY-MM-DD, Priority: High/Medium/Low, Complexity: Easy/Medium/Hard, 
-                Estimated Hours: X"}
+                {"role": "user", "content": f"{context_prompt}Analyze this task: '{task_description}'\nOutput format: Due Date: YYYY-MM-DD, Priority: High/Medium/Low, Complexity: Easy/Medium/Hard, Estimated Hours: X"}
             ]
         )
         analysis = response.choices[0].message.content.strip()
@@ -90,7 +90,6 @@ def analyze_task(task_description, category):
             "complexity": "Medium",
             "estimated_hours": 4
         }
-
 def save_task(description, category, analysis_result, dependencies=None, github_link=None, notes=None):
     task = {
         "description": description,
