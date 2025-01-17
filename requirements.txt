@@ -1,0 +1,6 @@
+streamlit
+openai
+pymongo
+pytz
+watchdog
+python-dotenv
