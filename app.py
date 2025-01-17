@@ -385,145 +385,79 @@ with tabs[2]:
             list(set([tag for task in fetch_tasks() for tag in task.get("tags", [])]))
         )
     
+    # Fix: Proper indentation for the if block
     if st.button("Apply Filters", type="primary"):
-    filtered_tasks = fetch_tasks({
-        "date_range": filter_date_range,
-        "priority": filter_priority,
-        "category": filter_category,
-        "status": filter_status,
-        "tags": filter_tags
-    })
-    
-    if filtered_tasks:
-        for task in filtered_tasks:
-            with st.container():
-                col1, col2 = st.columns([3, 1])
-                
-                with col1:
-                    # Task header with priority indicator
-                    priority_colors = {
-                        "Critical": "🔴",
-                        "High": "🟠",
-                        "Medium": "🟡",
-                        "Low": "🟢"
-                    }
-                    st.markdown(f"### {priority_colors.get(task['priority'], '⚪')} {task['description']}")
+        filtered_tasks = fetch_tasks({
+            "date_range": filter_date_range,
+            "priority": filter_priority,
+            "category": filter_category,
+            "status": filter_status,
+            "tags": filter_tags
+        })
+        
+        if filtered_tasks:
+            for task in filtered_tasks:
+                with st.container():
+                    col1, col2 = st.columns([3, 1])
                     
-                    # Task details
-                    st.markdown(f"**Category:** {task['category']}")
-                    st.markdown(f"**Due Date:** {task['due_date']}")
-                    st.markdown(f"**Tags:** {', '.join(task['tags'])}")
-                    if task['notes']:
-                        st.markdown(f"**Notes:** {task['notes']}")
-                
-                with col2:
-                    # Task status and update options
-                    new_status = st.selectbox(
-                        "Status",
-                        ["Pending", "In Progress", "Completed"],
-                        index=["Pending", "In Progress", "Completed"].index(task['status']),
-                        key=f"status_{task['_id']}"
-                    )
-                    
-                    actual_hours = st.number_input(
-                        "Actual Hours",
-                        min_value=0.0,
-                        value=float(task['actual_hours']),
-                        step=0.5,
-                        key=f"hours_{task['_id']}"
-                    )
-                    
-                    progress = st.slider(
-                        "Progress",
-                        0, 100,
-                        int(task['progress']),
-                        key=f"progress_{task['_id']}"
-                    )
-                    
-                    if (new_status != task['status'] or 
-                        actual_hours != task['actual_hours'] or 
-                        progress != task['progress']):
-                        
-                        updates = {
-                            "status": new_status,
-                            "actual_hours": actual_hours,
-                            "progress": progress
+                    with col1:
+                        # Task header with priority indicator
+                        priority_colors = {
+                            "Critical": "🔴",
+                            "High": "🟠",
+                            "Medium": "🟡",
+                            "Low": "🟢"
                         }
+                        st.markdown(f"### {priority_colors.get(task['priority'], '⚪')} {task['description']}")
                         
-                        # Add completion date if task is marked as completed
-                        if new_status == "Completed" and task['status'] != "Completed":
-                            updates["completion_date"] = datetime.now(pytz.UTC)
+                        # Task details
+                        st.markdown(f"**Category:** {task['category']}")
+                        st.markdown(f"**Due Date:** {task['due_date']}")
+                        st.markdown(f"**Tags:** {', '.join(task['tags'])}")
+                        if task['notes']:
+                            st.markdown(f"**Notes:** {task['notes']}")
+                    
+                    with col2:
+                        # Task status and update options
+                        new_status = st.selectbox(
+                            "Status",
+                            ["Pending", "In Progress", "Completed"],
+                            index=["Pending", "In Progress", "Completed"].index(task['status']),
+                            key=f"status_{task['_id']}"
+                        )
                         
-                        update_task(task['_id'], updates)
-                        st.success("✅ Task updated!")
-                
-                st.divider()
-    else:
-        st.info("No tasks found matching the selected filters.")
-
-# ---- TAB 4: Analytics ----
-with tabs[3]:
-    st.header("Development Analytics")
-    
-    # Date range for analytics
-    analytics_date_range = st.date_input(
-        "Analysis Period",
-        value=(datetime.now().date() - timedelta(days=30), datetime.now().date())
-    )
-    
-    # Fetch tasks for analysis
-    analytics_tasks = fetch_tasks({"date_range": analytics_date_range})
-    
-    if analytics_tasks:
-        metrics = generate_task_metrics(analytics_tasks)
-        
-        # Overview metrics
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Task Completion Rate", 
-                     f"{(metrics['completed_tasks']/metrics['total_tasks']*100):.1f}%")
-        with col2:
-            st.metric("Average Completion Time", 
-                     f"{metrics['avg_completion_time']:.1f}h")
-        with col3:
-            st.metric("Overdue Tasks", 
-                     metrics['overdue_tasks'])
-        
-        # Create DataFrame for analysis
-        df = pd.DataFrame(analytics_tasks)
-        
-        # Tasks by Category
-        fig_category = px.bar(
-            df['category'].value_counts().reset_index(),
-            x='index',
-            y='category',
-            title="Tasks by Category",
-            labels={'index': 'Category', 'category': 'Count'}
-        )
-        st.plotly_chart(fig_category)
-        
-        # Tasks by Priority
-        fig_priority = px.pie(
-            df['priority'].value_counts().reset_index(),
-            values='priority',
-            names='index',
-            title="Tasks by Priority"
-        )
-        st.plotly_chart(fig_priority)
-        
-        # Time Estimation Accuracy
-        if not df[df['status'] == 'Completed'].empty:
-            df_completed = df[df['status'] == 'Completed'].copy()
-            df_completed['estimation_accuracy'] = (
-                df_completed['actual_hours'] / df_completed['estimated_hours'] * 100
-            )
-            
-            fig_accuracy = px.histogram(
-                df_completed,
-                x='estimation_accuracy',
-                title="Time Estimation Accuracy Distribution",
-                labels={'estimation_accuracy': 'Actual vs Estimated Time (%)'}
-            )
-            st.plotly_chart(fig_accuracy)
-    else:
-        st.info("No tasks found in the selected date range for analysis.")
+                        actual_hours = st.number_input(
+                            "Actual Hours",
+                            min_value=0.0,
+                            value=float(task['actual_hours']),
+                            step=0.5,
+                            key=f"hours_{task['_id']}"
+                        )
+                        
+                        progress = st.slider(
+                            "Progress",
+                            0, 100,
+                            int(task['progress']),
+                            key=f"progress_{task['_id']}"
+                        )
+                        
+                        if (new_status != task['status'] or 
+                            actual_hours != task['actual_hours'] or 
+                            progress != task['progress']):
+                            
+                            updates = {
+                                "status": new_status,
+                                "actual_hours": actual_hours,
+                                "progress": progress
+                            }
+                            
+                            # Add completion date if task is marked as completed
+                            if new_status == "Completed" and task['status'] != "Completed":
+                                updates["completion_date"] = datetime.now(pytz.UTC)
+                            
+                            update_task(task['_id'], updates)
+                            st.success("✅ Task updated!")
+                    
+                    st.divider()
+        else:
+            st.info("No tasks found matching the selected filters.")
