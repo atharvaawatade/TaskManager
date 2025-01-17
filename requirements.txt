@@ -4,3 +4,4 @@ pymongo
 pytz
 watchdog
 python-dotenv
+plotly
