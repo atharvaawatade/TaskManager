@@ -5,268 +5,178 @@ from datetime import datetime, timedelta
 import pytz
 from bson.objectid import ObjectId
 
-# ---- CONFIGURATIONS ----
 st.set_page_config(page_title="Task Manager", page_icon="📋", layout="wide")
 
-# Initialize OpenAI and MongoDB clients
-client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# MongoDB setup
 mongo_client = MongoClient(st.secrets["MONGODB_URI"])
 db = mongo_client["task_manager"]
 tasks_collection = db["tasks"]
 
-# Simplified task categories
-TASK_CATEGORIES = [
-    "Development",
-    "Bug Fix",
-    "Review",
-    "Documentation",
-    "Meeting",
-    "Other"
-]
+CATEGORIES = ["Development", "Bug Fix", "Review", "Documentation", "Meeting", "Other"]
+PRIORITIES = ["High", "Medium", "Low"]
+STATUSES = ["Not Started", "In Progress", "Under Review", "Completed"]
 
-PRIORITY_LEVELS = ["High", "Medium", "Low"]
-STATUS_OPTIONS = ["Not Started", "In Progress", "Under Review", "Completed"]
-
-# ---- HELPER FUNCTIONS ----
 def format_date(date_obj):
-    """Format datetime object to string."""
     if isinstance(date_obj, str):
         return date_obj
     return date_obj.strftime("%Y-%m-%d")
 
-def parse_date(date_str):
-    """Parse date string to datetime object."""
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        return datetime.now()
-
-def get_time_estimate(description):
-    """Get AI-powered time estimate for task."""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a project management expert. Estimate the time required for this task in hours."},
-                {"role": "user", "content": f"How many hours would this task take: {description}"}
-            ]
-        )
-        # Extract number from response
-        estimate = float(response.choices[0].message.content.split()[0])
-        return min(max(estimate, 0.5), 40)  # Limit between 0.5 and 40 hours
-    except:
-        return 4  # Default estimate
-
-def save_task(description, category, priority, due_date, assignee=None, tags=None):
-    """Save task to database with improved structure."""
+def save_task(data):
     task = {
-        "description": description,
-        "category": category,
-        "priority": priority,
-        "due_date": format_date(due_date),
-        "assignee": assignee,
-        "tags": tags or [],
-        "estimated_hours": get_time_estimate(description),
-        "actual_hours": 0,
+        "title": data["title"],
+        "description": data.get("description", ""),
+        "category": data["category"],
+        "priority": data["priority"],
         "status": "Not Started",
+        "due_date": format_date(data["due_date"]),
         "created_at": datetime.now(pytz.UTC),
-        "last_updated": datetime.now(pytz.UTC),
-        "comments": [],
-        "attachments": [],
-        "progress": 0
+        "updated_at": datetime.now(pytz.UTC)
     }
-    result = tasks_collection.insert_one(task)
-    return result.inserted_id
+    return tasks_collection.insert_one(task).inserted_id
 
 def fetch_tasks(filters=None):
-    """Fetch tasks with flexible filtering."""
     query = filters or {}
-    return list(tasks_collection.find(query).sort([("due_date", 1), ("priority", -1)]))
+    return list(tasks_collection.find(query).sort("due_date", 1))
 
-# ---- UI COMPONENTS ----
+def update_task_status(task_id, status):
+    tasks_collection.update_one(
+        {"_id": ObjectId(task_id)},
+        {
+            "$set": {
+                "status": status,
+                "updated_at": datetime.now(pytz.UTC)
+            }
+        }
+    )
+
 def render_task_card(task):
-    """Render an individual task card."""
     with st.container():
-        col1, col2, col3 = st.columns([3, 1, 1])
+        cols = st.columns([3, 2, 1])
         
-        with col1:
-            st.markdown(f"### {task['description']}")
-            st.text(f"Category: {task['category']} | Priority: {task['priority']}")
+        with cols[0]:
+            st.markdown(f"### {task['title']}")
+            if task.get('description'):
+                st.text(task['description'])
         
-        with col2:
+        with cols[1]:
             st.text(f"Due: {task['due_date']}")
-            st.progress(task['progress'])
+            st.text(f"Category: {task['category']}")
+            st.text(f"Priority: {task['priority']}")
         
-        with col3:
+        with cols[2]:
+            current_status = task.get('status', 'Not Started')
             new_status = st.selectbox(
                 "Status",
-                STATUS_OPTIONS,
-                index=STATUS_OPTIONS.index(task['status']),
+                STATUSES,
+                index=STATUSES.index(current_status),
                 key=f"status_{str(task['_id'])}"
             )
-            if new_status != task['status']:
-                tasks_collection.update_one(
-                    {"_id": task['_id']},
-                    {"$set": {"status": new_status, "last_updated": datetime.now(pytz.UTC)}}
-                )
+            if new_status != current_status:
+                update_task_status(task['_id'], new_status)
 
-def task_creation_form():
-    """Render the task creation form."""
+def task_form():
     with st.form("task_form"):
-        description = st.text_area("Task Description", height=100)
-        col1, col2, col3 = st.columns(3)
+        title = st.text_input("Title")
+        description = st.text_area("Description")
+        cols = st.columns(3)
         
-        with col1:
-            category = st.selectbox("Category", TASK_CATEGORIES)
-        with col2:
-            priority = st.selectbox("Priority", PRIORITY_LEVELS)
-        with col3:
+        with cols[0]:
+            category = st.selectbox("Category", CATEGORIES)
+        with cols[1]:
+            priority = st.selectbox("Priority", PRIORITIES)
+        with cols[2]:
             due_date = st.date_input("Due Date", min_value=datetime.now())
         
-        assignee = st.text_input("Assignee (optional)")
-        tags = st.multiselect("Tags", ["Frontend", "Backend", "UI/UX", "Database", "API", "Testing"])
-        
-        submitted = st.form_submit_button("Create Task")
-        if submitted and description:
-            task_id = save_task(description, category, priority, due_date, assignee, tags)
-            st.success("Task created successfully!")
-            return True
+        if st.form_submit_button("Create Task"):
+            if title:
+                save_task({
+                    "title": title,
+                    "description": description,
+                    "category": category,
+                    "priority": priority,
+                    "due_date": due_date
+                })
+                return True
     return False
-# ---- ANALYTICS FUNCTIONS ----
-def calculate_analytics(tasks):
-    """Calculate key metrics and analytics."""
+def calculate_metrics(tasks):
     if not tasks:
         return None
-        
-    total_tasks = len(tasks)
+    
+    total = len(tasks)
     completed = sum(1 for t in tasks if t['status'] == 'Completed')
-    
-    analytics = {
-        "total_tasks": total_tasks,
-        "completion_rate": (completed / total_tasks * 100) if total_tasks > 0 else 0,
-        "total_hours": sum(t['actual_hours'] for t in tasks),
-        "category_distribution": {},
-        "priority_breakdown": {},
-        "overdue_tasks": sum(1 for t in tasks if parse_date(t['due_date']) < datetime.now() and t['status'] != 'Completed')
+    return {
+        "total": total,
+        "completed": completed,
+        "completion_rate": (completed / total * 100) if total > 0 else 0,
+        "categories": {cat: sum(1 for t in tasks if t['category'] == cat) for cat in CATEGORIES},
+        "priorities": {pri: sum(1 for t in tasks if t['priority'] == pri) for pri in PRIORITIES}
     }
-    
-    for task in tasks:
-        analytics["category_distribution"][task['category']] = analytics["category_distribution"].get(task['category'], 0) + 1
-        analytics["priority_breakdown"][task['priority']] = analytics["priority_breakdown"].get(task['priority'], 0) + 1
-    
-    return analytics
 
-# ---- MAIN APPLICATION ----
 def main():
-    st.title("📋 Task Manager Pro")
+    st.title("Task Manager")
     
     # Sidebar filters
-    st.sidebar.title("Filters")
-    filter_status = st.sidebar.multiselect("Status", STATUS_OPTIONS)
-    filter_category = st.sidebar.multiselect("Category", TASK_CATEGORIES)
-    filter_priority = st.sidebar.multiselect("Priority", PRIORITY_LEVELS)
+    st.sidebar.header("Filters")
+    f_status = st.sidebar.multiselect("Status", STATUSES)
+    f_category = st.sidebar.multiselect("Category", CATEGORIES)
+    f_priority = st.sidebar.multiselect("Priority", PRIORITIES)
     
-    # Main tabs
-    tab1, tab2, tab3 = st.tabs(["Tasks", "Analytics", "Settings"])
+    tab1, tab2 = st.tabs(["Tasks", "Analytics"])
     
     with tab1:
-        st.header("Task Management")
+        st.button("➕ New Task", on_click=lambda: st.session_state.update({"show_form": True}))
         
-        # Task creation section
-        with st.expander("➕ Create New Task", expanded=False):
-            task_creation_form()
+        if st.session_state.get("show_form", False):
+            if task_form():
+                st.session_state["show_form"] = False
+                st.rerun()
         
-        # Task filters
+        # Apply filters
         query = {}
-        if filter_status:
-            query["status"] = {"$in": filter_status}
-        if filter_category:
-            query["category"] = {"$in": filter_category}
-        if filter_priority:
-            query["priority"] = {"$in": filter_priority}
-            
-        tasks = fetch_tasks(query)
+        if f_status: query["status"] = {"$in": f_status}
+        if f_category: query["category"] = {"$in": f_category}
+        if f_priority: query["priority"] = {"$in": f_priority}
         
-        # Task display
+        tasks = fetch_tasks(query)
         st.subheader(f"Tasks ({len(tasks)})")
+        
         for task in tasks:
             render_task_card(task)
-            
-        if not tasks:
-            st.info("No tasks found matching the filters.")
     
     with tab2:
-        st.header("Analytics Dashboard")
-        analytics = calculate_analytics(fetch_tasks())
-        
-        if analytics:
-            col1, col2, col3, col4 = st.columns(4)
+        metrics = calculate_metrics(fetch_tasks())
+        if metrics:
+            col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Total Tasks", analytics["total_tasks"])
+                st.metric("Total Tasks", metrics["total"])
             with col2:
-                st.metric("Completion Rate", f"{analytics['completion_rate']:.1f}%")
+                st.metric("Completed", metrics["completed"])
             with col3:
-                st.metric("Total Hours", f"{analytics['total_hours']:.1f}")
-            with col4:
-                st.metric("Overdue Tasks", analytics["overdue_tasks"])
+                st.metric("Completion Rate", f"{metrics['completion_rate']:.1f}%")
             
             # Visualizations
-            st.subheader("Distribution Analysis")
-            col5, col6 = st.columns(2)
+            st.subheader("Distribution")
+            col4, col5 = st.columns(2)
             
-            with col5:
-                st.bar_chart(analytics["category_distribution"])
+            with col4:
+                st.bar_chart(metrics["categories"])
                 st.caption("Tasks by Category")
             
-            with col6:
-                st.bar_chart(analytics["priority_breakdown"])
+            with col5:
+                st.bar_chart(metrics["priorities"])
                 st.caption("Tasks by Priority")
             
-            # Time analysis
-            st.subheader("Time Analysis")
-            time_data = {
-                task['description']: {
-                    'estimated': task['estimated_hours'],
-                    'actual': task['actual_hours']
-                }
-                for task in fetch_tasks({"status": "Completed"})
-            }
-            if time_data:
+            # Export functionality
+            if st.button("Export Tasks"):
                 import pandas as pd
-                time_df = pd.DataFrame(time_data).T
-                st.bar_chart(time_df)
-    
-    with tab3:
-        st.header("Settings")
-        
-        # Export/Import functionality
-        col7, col8 = st.columns(2)
-        
-        with col7:
-            if st.button("Export Tasks (CSV)"):
-                import pandas as pd
-                tasks_df = pd.DataFrame(fetch_tasks())
+                df = pd.DataFrame(fetch_tasks())
                 st.download_button(
                     "Download CSV",
-                    tasks_df.to_csv(index=False).encode('utf-8'),
-                    "tasks_export.csv",
+                    df.to_csv(index=False).encode('utf-8'),
+                    "tasks.csv",
                     "text/csv"
                 )
-        
-        with col8:
-            uploaded_file = st.file_uploader("Import Tasks (CSV)", type="csv")
-            if uploaded_file:
-                import pandas as pd
-                df = pd.read_csv(uploaded_file)
-                for _, row in df.iterrows():
-                    save_task(
-                        row['description'],
-                        row['category'],
-                        row['priority'],
-                        row['due_date']
-                    )
-                st.success("Tasks imported successfully!")
 
 if __name__ == "__main__":
     main()
