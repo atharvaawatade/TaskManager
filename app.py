@@ -2,181 +2,239 @@ import streamlit as st
 import openai
 from pymongo import MongoClient
 from datetime import datetime, timedelta
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import pytz
-from bson.objectid import ObjectId
 
-st.set_page_config(page_title="Task Manager", page_icon="📋", layout="wide")
+# ---- CONFIGURATIONS ----
+# OpenAI API Key
+client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# MongoDB setup
+# MongoDB Connection
 mongo_client = MongoClient(st.secrets["MONGODB_URI"])
 db = mongo_client["task_manager"]
 tasks_collection = db["tasks"]
 
-CATEGORIES = ["Development", "Bug Fix", "Review", "Documentation", "Meeting", "Other"]
-PRIORITIES = ["High", "Medium", "Low"]
-STATUSES = ["Not Started", "In Progress", "Under Review", "Completed"]
+# SMTP Email Configuration
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+FROM_EMAIL = st.secrets["SMTP_EMAIL"]
+FROM_PASSWORD = st.secrets["SMTP_PASSWORD"]
+TO_EMAIL = st.secrets["TO_EMAIL"]
 
-def format_date(date_obj):
-    if isinstance(date_obj, str):
-        return date_obj
-    return date_obj.strftime("%Y-%m-%d")
+# ---- FUNCTIONS ----
 
-def save_task(data):
+def analyze_task(task_description):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a task analyzer. Extract the due date and priority from the task description. If no specific date is mentioned, suggest a reasonable due date based on the task's context."},
+                {"role": "user", "content": f"Extract the due date and priority from this task: '{task_description}'\nOutput in this format: Due Date: YYYY-MM-DD, Priority: High/Medium/Low"}
+            ]
+        )
+        analysis = response.choices[0].message.content.strip()
+        
+        # Parse the output
+        due_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")  # default
+        priority = "Medium"  # default
+        
+        for line in analysis.split(","):
+            if "Due Date" in line:
+                date_str = line.split(":")[-1].strip()
+                try:
+                    # Validate date format
+                    datetime.strptime(date_str, "%Y-%m-%d")
+                    due_date = date_str
+                except ValueError:
+                    pass
+            if "Priority" in line:
+                priority = line.split(":")[-1].strip()
+        
+        return due_date, priority
+    except Exception as e:
+        st.error(f"Error analyzing the task: {str(e)}")
+        return (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"), "Medium"
+
+def save_task(description, due_date, priority):
     task = {
-        "title": data["title"],
-        "description": data.get("description", ""),
-        "category": data["category"],
-        "priority": data["priority"],
-        "status": "Not Started",
-        "due_date": format_date(data["due_date"]),
+        "description": description,
+        "due_date": due_date,
+        "priority": priority,
+        "status": "Pending",
         "created_at": datetime.now(pytz.UTC),
-        "updated_at": datetime.now(pytz.UTC)
+        "last_updated": datetime.now(pytz.UTC)
     }
-    return tasks_collection.insert_one(task).inserted_id
+    result = tasks_collection.insert_one(task)
+    task["_id"] = result.inserted_id
+    return task
 
-def fetch_tasks(filters=None):
-    query = filters or {}
+def send_email(subject, body):
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = FROM_EMAIL
+        msg["To"] = TO_EMAIL
+        msg["Subject"] = subject
+        
+        # Create HTML body with better formatting
+        html_body = (
+            "<html>"
+            "<body>"
+            f"<h2>{subject}</h2>"
+            '<div style="margin: 20px 0;">'
+            f"{body.replace(chr(10), '<br>')}"
+            "</div>"
+            '<p style="color: #666;">This is an automated message from your Task Manager.</p>'
+            "</body>"
+            "</html>"
+        )
+        
+        msg.attach(MIMEText(html_body, "html"))
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(FROM_EMAIL, FROM_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        st.error(f"Error sending email: {str(e)}")
+        return False
+
+def fetch_tasks(date_filter=None, status_filter=None):
+    query = {}
+    if date_filter:
+        query["due_date"] = date_filter
+    if status_filter and status_filter != "All":
+        query["status"] = status_filter
     return list(tasks_collection.find(query).sort("due_date", 1))
 
-def update_task_status(task_id, status):
+def update_task_status(task_id, new_status):
     tasks_collection.update_one(
-        {"_id": ObjectId(task_id)},
+        {"_id": task_id},
         {
             "$set": {
-                "status": status,
-                "updated_at": datetime.now(pytz.UTC)
+                "status": new_status,
+                "last_updated": datetime.now(pytz.UTC)
             }
         }
     )
 
-def render_task_card(task):
-    with st.container():
-        cols = st.columns([3, 2, 1])
-        
-        with cols[0]:
-            st.markdown(f"### {task['title']}")
-            if task.get('description'):
-                st.text(task['description'])
-        
-        with cols[1]:
-            st.text(f"Due: {task['due_date']}")
-            st.text(f"Category: {task['category']}")
-            st.text(f"Priority: {task['priority']}")
-        
-        with cols[2]:
-            current_status = task.get('status', 'Not Started')
-            new_status = st.selectbox(
-                "Status",
-                STATUSES,
-                index=STATUSES.index(current_status),
-                key=f"status_{str(task['_id'])}"
-            )
-            if new_status != current_status:
-                update_task_status(task['_id'], new_status)
+# ---- STREAMLIT UI ----
 
-def task_form():
-    with st.form("task_form"):
-        title = st.text_input("Title")
-        description = st.text_area("Description")
-        cols = st.columns(3)
-        
-        with cols[0]:
-            category = st.selectbox("Category", CATEGORIES)
-        with cols[1]:
-            priority = st.selectbox("Priority", PRIORITIES)
-        with cols[2]:
-            due_date = st.date_input("Due Date", min_value=datetime.now())
-        
-        if st.form_submit_button("Create Task"):
-            if title:
-                save_task({
-                    "title": title,
-                    "description": description,
-                    "category": category,
-                    "priority": priority,
-                    "due_date": due_date
-                })
-                return True
-    return False
-def calculate_metrics(tasks):
-    if not tasks:
-        return None
-    
-    total = len(tasks)
-    completed = sum(1 for t in tasks if t['status'] == 'Completed')
-    return {
-        "total": total,
-        "completed": completed,
-        "completion_rate": (completed / total * 100) if total > 0 else 0,
-        "categories": {cat: sum(1 for t in tasks if t['category'] == cat) for cat in CATEGORIES},
-        "priorities": {pri: sum(1 for t in tasks if t['priority'] == pri) for pri in PRIORITIES}
-    }
+st.set_page_config(page_title="Task Manager Pro", page_icon="📋", layout="wide")
+st.title("📋 Advanced Task Manager Pro")
+st.sidebar.header("Task Manager Controls")
 
-def main():
-    st.title("Task Manager")
+# Tabs for the interface
+tabs = st.tabs(["Add Task", "View Tasks", "Task Analysis"])
+
+# ---- TAB 1: Add Task ----
+with tabs[0]:
+    st.header("Add a New Task")
+    task_input = st.text_area(
+        "Describe your task:",
+        placeholder="e.g., Prepare presentation for tomorrow's meeting. Include due date and priority in the description if needed."
+    )
     
-    # Sidebar filters
-    st.sidebar.header("Filters")
-    f_status = st.sidebar.multiselect("Status", STATUSES)
-    f_category = st.sidebar.multiselect("Category", CATEGORIES)
-    f_priority = st.sidebar.multiselect("Priority", PRIORITIES)
+    col1, col2 = st.columns(2)
+    with col1:
+        manual_due_date = st.date_input("Override Due Date (optional):")
+    with col2:
+        manual_priority = st.selectbox("Override Priority (optional):", ["Auto-detect", "High", "Medium", "Low"])
     
-    tab1, tab2 = st.tabs(["Tasks", "Analytics"])
-    
-    with tab1:
-        st.button("➕ New Task", on_click=lambda: st.session_state.update({"show_form": True}))
-        
-        if st.session_state.get("show_form", False):
-            if task_form():
-                st.session_state["show_form"] = False
-                st.rerun()
-        
-        # Apply filters
-        query = {}
-        if f_status: query["status"] = {"$in": f_status}
-        if f_category: query["category"] = {"$in": f_category}
-        if f_priority: query["priority"] = {"$in": f_priority}
-        
-        tasks = fetch_tasks(query)
-        st.subheader(f"Tasks ({len(tasks)})")
-        
-        for task in tasks:
-            render_task_card(task)
-    
-    with tab2:
-        metrics = calculate_metrics(fetch_tasks())
-        if metrics:
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Total Tasks", metrics["total"])
-            with col2:
-                st.metric("Completed", metrics["completed"])
-            with col3:
-                st.metric("Completion Rate", f"{metrics['completion_rate']:.1f}%")
-            
-            # Visualizations
-            st.subheader("Distribution")
-            col4, col5 = st.columns(2)
-            
-            with col4:
-                st.bar_chart(metrics["categories"])
-                st.caption("Tasks by Category")
-            
-            with col5:
-                st.bar_chart(metrics["priorities"])
-                st.caption("Tasks by Priority")
-            
-            # Export functionality
-            if st.button("Export Tasks"):
-                import pandas as pd
-                df = pd.DataFrame(fetch_tasks())
-                st.download_button(
-                    "Download CSV",
-                    df.to_csv(index=False).encode('utf-8'),
-                    "tasks.csv",
-                    "text/csv"
+    if st.button("Add Task", type="primary"):
+        if task_input.strip():
+            with st.spinner("Analyzing and saving task..."):
+                due_date, priority = analyze_task(task_input)
+                
+                # Use manual overrides if provided
+                if manual_priority != "Auto-detect":
+                    priority = manual_priority
+                if manual_due_date:
+                    due_date = manual_due_date.strftime("%Y-%m-%d")
+                
+                saved_task = save_task(task_input, due_date, priority)
+                
+                email_body = (
+                    "New Task Added:\n\n"
+                    f"Description: {task_input}\n"
+                    f"Due Date: {due_date}\n"
+                    f"Priority: {priority}\n\n"
+                    "Stay productive!"
                 )
+                
+                email_sent = send_email("New Task Added to Your Task Manager", email_body)
+                
+                st.success("✅ Task added successfully!")
+                st.write(f"**Due Date:** {due_date}")
+                st.write(f"**Priority:** {priority}")
+                if email_sent:
+                    st.info("📧 Notification email sent!")
+        else:
+            st.warning("⚠️ Please enter a task description.")
 
-if __name__ == "__main__":
-    main()
+# ---- TAB 2: View Tasks ----
+with tabs[1]:
+    st.header("View Your Tasks")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        filter_date = st.date_input("Filter by date (optional):")
+    with col2:
+        status_filter = st.selectbox("Filter by status:", ["All", "Pending", "In Progress", "Completed"])
+    
+    if st.button("Refresh Tasks", type="primary"):
+        tasks = fetch_tasks(
+            filter_date.strftime("%Y-%m-%d") if filter_date else None,
+            status_filter
+        )
+        
+        if tasks:
+            for task in tasks:
+                with st.container():
+                    col1, col2 = st.columns([3, 1])
+                    
+                    with col1:
+                        st.markdown(f"### {task['description']}")
+                        st.markdown(
+                            f"**Due:** {task['due_date']} | "
+                            f"**Priority:** {task['priority']} | "
+                            f"**Status:** {task['status']}"
+                        )
+                    
+                    with col2:
+                        new_status = st.selectbox(
+                            "Update Status",
+                            ["Pending", "In Progress", "Completed"],
+                            key=str(task['_id']),
+                            index=["Pending", "In Progress", "Completed"].index(task['status'])
+                        )
+                        if new_status != task['status']:
+                            update_task_status(task['_id'], new_status)
+                            st.experimental_rerun()
+                    
+                    st.markdown("---")
+        else:
+            st.info("No tasks found for the selected filters.")
+
+# ---- TAB 3: Task Analysis ----
+with tabs[2]:
+    st.header("Analyze a Task")
+    analyze_input = st.text_area(
+        "Enter a task description to analyze:",
+        placeholder="e.g., Complete project report by next week."
+    )
+    if st.button("Analyze Task", type="primary"):
+        if analyze_input.strip():
+            with st.spinner("Analyzing task..."):
+                analyzed_due_date, analyzed_priority = analyze_task(analyze_input)
+                st.success("Analysis complete!")
+                st.write(f"**Suggested Due Date:** {analyzed_due_date}")
+                st.write(f"**Suggested Priority:** {analyzed_priority}")
+        else:
+            st.warning("⚠️ Please enter a task description.")
+
+# Footer
+st.markdown("---")
+st.markdown("💡 Developed with ❤️ by Atharva. Powered by OpenAI, Streamlit, and MongoDB.")
