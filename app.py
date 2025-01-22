@@ -2,212 +2,271 @@ import streamlit as st
 import openai
 from pymongo import MongoClient
 from datetime import datetime, timedelta
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import pytz
-import speech_recognition as sr
-import pyttsx3
-import threading
-import queue
-import json
-from typing import Dict, List
+from bson.objectid import ObjectId
 
 # ---- CONFIGURATIONS ----
+st.set_page_config(page_title="Task Manager", page_icon="📋", layout="wide")
+
+# Initialize OpenAI and MongoDB clients
 client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 mongo_client = MongoClient(st.secrets["MONGODB_URI"])
 db = mongo_client["task_manager"]
 tasks_collection = db["tasks"]
 
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-FROM_EMAIL = st.secrets["SMTP_EMAIL"]
-FROM_PASSWORD = st.secrets["SMTP_PASSWORD"]
-TO_EMAIL = st.secrets["TO_EMAIL"]
+# Simplified task categories
+TASK_CATEGORIES = [
+    "Development",
+    "Bug Fix",
+    "Review",
+    "Documentation",
+    "Meeting",
+    "Other"
+]
 
-# Voice Recognition Setup
-recognizer = sr.Recognizer()
-voice_queue = queue.Queue()
+PRIORITY_LEVELS = ["High", "Medium", "Low"]
+STATUS_OPTIONS = ["Not Started", "In Progress", "Under Review", "Completed"]
 
-class AIAssistant:
-    def __init__(self):
-        self.context = []
-        self.assistant_id = self._create_assistant()
+# ---- HELPER FUNCTIONS ----
+def format_date(date_obj):
+    """Format datetime object to string."""
+    if isinstance(date_obj, str):
+        return date_obj
+    return date_obj.strftime("%Y-%m-%d")
 
-    def _create_assistant(self) -> str:
-        assistant = client.beta.assistants.create(
-            name="Task Manager Assistant",
-            instructions="""You are an AI assistant for a task management system. 
-            Help users organize tasks, set priorities, and manage their time effectively. 
-            Provide specific, actionable advice and help break down complex tasks.""",
-            model="gpt-4-1106-preview",
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "manage_task",
-                    "description": "Create, update, or analyze tasks",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {"type": "string", "enum": ["create", "update", "analyze"]},
-                            "description": {"type": "string"},
-                            "due_date": {"type": "string", "format": "date"},
-                            "priority": {"type": "string", "enum": ["High", "Medium", "Low"]}
-                        },
-                        "required": ["action", "description"]
-                    }
-                }
-            }]
+def parse_date(date_str):
+    """Parse date string to datetime object."""
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return datetime.now()
+
+def get_time_estimate(description):
+    """Get AI-powered time estimate for task."""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a project management expert. Estimate the time required for this task in hours."},
+                {"role": "user", "content": f"How many hours would this task take: {description}"}
+            ]
         )
-        return assistant.id
+        # Extract number from response
+        estimate = float(response.choices[0].message.content.split()[0])
+        return min(max(estimate, 0.5), 40)  # Limit between 0.5 and 40 hours
+    except:
+        return 4  # Default estimate
 
-    def process_message(self, user_message: str) -> Dict:
-        thread = client.beta.threads.create()
+def save_task(description, category, priority, due_date, assignee=None, tags=None):
+    """Save task to database with improved structure."""
+    task = {
+        "description": description,
+        "category": category,
+        "priority": priority,
+        "due_date": format_date(due_date),
+        "assignee": assignee,
+        "tags": tags or [],
+        "estimated_hours": get_time_estimate(description),
+        "actual_hours": 0,
+        "status": "Not Started",
+        "created_at": datetime.now(pytz.UTC),
+        "last_updated": datetime.now(pytz.UTC),
+        "comments": [],
+        "attachments": [],
+        "progress": 0
+    }
+    result = tasks_collection.insert_one(task)
+    return result.inserted_id
+
+def fetch_tasks(filters=None):
+    """Fetch tasks with flexible filtering."""
+    query = filters or {}
+    return list(tasks_collection.find(query).sort([("due_date", 1), ("priority", -1)]))
+
+# ---- UI COMPONENTS ----
+def render_task_card(task):
+    """Render an individual task card."""
+    with st.container():
+        col1, col2, col3 = st.columns([3, 1, 1])
         
-        client.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=user_message
-        )
-
-        run = client.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=self.assistant_id
-        )
-
-        while run.status != "completed":
-            run = client.beta.threads.runs.retrieve(
-                thread_id=thread.id,
-                run_id=run.id
+        with col1:
+            st.markdown(f"### {task['description']}")
+            st.text(f"Category: {task['category']} | Priority: {task['priority']}")
+        
+        with col2:
+            st.text(f"Due: {task['due_date']}")
+            st.progress(task['progress'])
+        
+        with col3:
+            new_status = st.selectbox(
+                "Status",
+                STATUS_OPTIONS,
+                index=STATUS_OPTIONS.index(task['status']),
+                key=f"status_{str(task['_id'])}"
             )
+            if new_status != task['status']:
+                tasks_collection.update_one(
+                    {"_id": task['_id']},
+                    {"$set": {"status": new_status, "last_updated": datetime.now(pytz.UTC)}}
+                )
 
-        messages = client.beta.threads.messages.list(thread_id=thread.id)
-        return {
-            "response": messages.data[0].content[0].text.value,
-            "thread_id": thread.id
-        }
-
-class VoiceHandler:
-    def __init__(self):
-        self.engine = pyttsx3.init()
-        self.is_listening = False
-
-    def start_listening(self):
-        self.is_listening = True
-        threading.Thread(target=self._listen_continuous).start()
-
-    def stop_listening(self):
-        self.is_listening = False
-
-    def _listen_continuous(self):
-        with sr.Microphone() as source:
-            while self.is_listening:
-                try:
-                    audio = recognizer.listen(source, timeout=5)
-                    text = recognizer.recognize_google(audio)
-                    voice_queue.put(text)
-                except (sr.WaitTimeoutError, sr.UnknownValueError):
-                    continue
-                except Exception as e:
-                    st.error(f"Voice recognition error: {str(e)}")
-                    break
-
-    def speak(self, text: str):
-        self.engine.say(text)
-        self.engine.runAndWait()
-
-def analyze_task(task_description: str, ai_assistant: AIAssistant) -> tuple:
-    response = ai_assistant.process_message(
-        f"Analyze this task and suggest due date and priority: {task_description}"
-    )
+def task_creation_form():
+    """Render the task creation form."""
+    with st.form("task_form"):
+        description = st.text_area("Task Description", height=100)
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            category = st.selectbox("Category", TASK_CATEGORIES)
+        with col2:
+            priority = st.selectbox("Priority", PRIORITY_LEVELS)
+        with col3:
+            due_date = st.date_input("Due Date", min_value=datetime.now())
+        
+        assignee = st.text_input("Assignee (optional)")
+        tags = st.multiselect("Tags", ["Frontend", "Backend", "UI/UX", "Database", "API", "Testing"])
+        
+        submitted = st.form_submit_button("Create Task")
+        if submitted and description:
+            task_id = save_task(description, category, priority, due_date, assignee, tags)
+            st.success("Task created successfully!")
+            return True
+    return False
+# ---- ANALYTICS FUNCTIONS ----
+def calculate_analytics(tasks):
+    """Calculate key metrics and analytics."""
+    if not tasks:
+        return None
+        
+    total_tasks = len(tasks)
+    completed = sum(1 for t in tasks if t['status'] == 'Completed')
     
-    # Parse AI response for due date and priority
-    analysis = response["response"]
-    due_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-    priority = "Medium"
+    analytics = {
+        "total_tasks": total_tasks,
+        "completion_rate": (completed / total_tasks * 100) if total_tasks > 0 else 0,
+        "total_hours": sum(t['actual_hours'] for t in tasks),
+        "category_distribution": {},
+        "priority_breakdown": {},
+        "overdue_tasks": sum(1 for t in tasks if parse_date(t['due_date']) < datetime.now() and t['status'] != 'Completed')
+    }
     
-    # Advanced parsing logic here...
-    # (Previous analyze_task function logic)
+    for task in tasks:
+        analytics["category_distribution"][task['category']] = analytics["category_distribution"].get(task['category'], 0) + 1
+        analytics["priority_breakdown"][task['priority']] = analytics["priority_breakdown"].get(task['priority'], 0) + 1
     
-    return due_date, priority
+    return analytics
 
-def save_task(description: str, due_date: str, priority: str) -> Dict:
-    # (Previous save_task function)
-    pass
+# ---- MAIN APPLICATION ----
+def main():
+    st.title("📋 Task Manager Pro")
+    
+    # Sidebar filters
+    st.sidebar.title("Filters")
+    filter_status = st.sidebar.multiselect("Status", STATUS_OPTIONS)
+    filter_category = st.sidebar.multiselect("Category", TASK_CATEGORIES)
+    filter_priority = st.sidebar.multiselect("Priority", PRIORITY_LEVELS)
+    
+    # Main tabs
+    tab1, tab2, tab3 = st.tabs(["Tasks", "Analytics", "Settings"])
+    
+    with tab1:
+        st.header("Task Management")
+        
+        # Task creation section
+        with st.expander("➕ Create New Task", expanded=False):
+            task_creation_form()
+        
+        # Task filters
+        query = {}
+        if filter_status:
+            query["status"] = {"$in": filter_status}
+        if filter_category:
+            query["category"] = {"$in": filter_category}
+        if filter_priority:
+            query["priority"] = {"$in": filter_priority}
+            
+        tasks = fetch_tasks(query)
+        
+        # Task display
+        st.subheader(f"Tasks ({len(tasks)})")
+        for task in tasks:
+            render_task_card(task)
+            
+        if not tasks:
+            st.info("No tasks found matching the filters.")
+    
+    with tab2:
+        st.header("Analytics Dashboard")
+        analytics = calculate_analytics(fetch_tasks())
+        
+        if analytics:
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total Tasks", analytics["total_tasks"])
+            with col2:
+                st.metric("Completion Rate", f"{analytics['completion_rate']:.1f}%")
+            with col3:
+                st.metric("Total Hours", f"{analytics['total_hours']:.1f}")
+            with col4:
+                st.metric("Overdue Tasks", analytics["overdue_tasks"])
+            
+            # Visualizations
+            st.subheader("Distribution Analysis")
+            col5, col6 = st.columns(2)
+            
+            with col5:
+                st.bar_chart(analytics["category_distribution"])
+                st.caption("Tasks by Category")
+            
+            with col6:
+                st.bar_chart(analytics["priority_breakdown"])
+                st.caption("Tasks by Priority")
+            
+            # Time analysis
+            st.subheader("Time Analysis")
+            time_data = {
+                task['description']: {
+                    'estimated': task['estimated_hours'],
+                    'actual': task['actual_hours']
+                }
+                for task in fetch_tasks({"status": "Completed"})
+            }
+            if time_data:
+                import pandas as pd
+                time_df = pd.DataFrame(time_data).T
+                st.bar_chart(time_df)
+    
+    with tab3:
+        st.header("Settings")
+        
+        # Export/Import functionality
+        col7, col8 = st.columns(2)
+        
+        with col7:
+            if st.button("Export Tasks (CSV)"):
+                import pandas as pd
+                tasks_df = pd.DataFrame(fetch_tasks())
+                st.download_button(
+                    "Download CSV",
+                    tasks_df.to_csv(index=False).encode('utf-8'),
+                    "tasks_export.csv",
+                    "text/csv"
+                )
+        
+        with col8:
+            uploaded_file = st.file_uploader("Import Tasks (CSV)", type="csv")
+            if uploaded_file:
+                import pandas as pd
+                df = pd.read_csv(uploaded_file)
+                for _, row in df.iterrows():
+                    save_task(
+                        row['description'],
+                        row['category'],
+                        row['priority'],
+                        row['due_date']
+                    )
+                st.success("Tasks imported successfully!")
 
-def send_email(subject: str, body: str) -> bool:
-    # (Previous send_email function)
-    pass
-
-# ---- STREAMLIT UI ----
-st.set_page_config(page_title="AI Task Manager Pro", page_icon="🤖", layout="wide")
-st.title("🤖 AI-Powered Task Manager Pro")
-
-# Initialize AI Assistant and Voice Handler
-if 'ai_assistant' not in st.session_state:
-    st.session_state.ai_assistant = AIAssistant()
-if 'voice_handler' not in st.session_state:
-    st.session_state.voice_handler = VoiceHandler()
-
-# Voice Control Section
-st.sidebar.header("Voice Controls")
-voice_col1, voice_col2 = st.sidebar.columns(2)
-with voice_col1:
-    if st.button("Start Voice"):
-        st.session_state.voice_handler.start_listening()
-        st.success("Voice recognition started!")
-with voice_col2:
-    if st.button("Stop Voice"):
-        st.session_state.voice_handler.stop_listening()
-        st.info("Voice recognition stopped!")
-
-# AI Chat Section
-st.sidebar.header("AI Assistant")
-user_message = st.sidebar.text_area("Ask your AI assistant:")
-if st.sidebar.button("Send") and user_message:
-    with st.sidebar.spinner("AI is thinking..."):
-        response = st.session_state.ai_assistant.process_message(user_message)
-        st.sidebar.write("AI:", response["response"])
-
-# Process voice input if available
-try:
-    while not voice_queue.empty():
-        voice_text = voice_queue.get_nowait()
-        st.info(f"Voice Input: {voice_text}")
-        with st.spinner("Processing voice command..."):
-            response = st.session_state.ai_assistant.process_message(voice_text)
-            st.session_state.voice_handler.speak(response["response"])
-except queue.Empty:
-    pass
-
-# Main Tabs
-tabs = st.tabs(["Add Task", "View Tasks", "Task Analysis", "AI Insights"])
-
-# Add Task Tab
-with tabs[0]:
-    # (Previous Add Task tab code with AI integration)
-    pass
-
-# View Tasks Tab
-with tabs[1]:
-    # (Previous View Tasks tab code)
-    pass
-
-# Task Analysis Tab
-with tabs[2]:
-    # (Previous Task Analysis tab code with AI integration)
-    pass
-
-# AI Insights Tab
-with tabs[3]:
-    st.header("AI Task Insights")
-    if st.button("Generate Task Analysis Report"):
-        with st.spinner("AI generating insights..."):
-            tasks = list(tasks_collection.find())
-            insight_prompt = f"Analyze these tasks and provide insights about productivity patterns: {json.dumps(tasks)}"
-            insights = st.session_state.ai_assistant.process_message(insight_prompt)
-            st.write(insights["response"])
-
-# Footer
-st.markdown("---")
-st.markdown("🤖 Powered by Advanced AI, Voice Recognition, and Smart Task Management")
+if __name__ == "__main__":
+    main()
